@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Floorsheet Scanner</title>
+<style>
+:root{--bg:#121212;--panel:#1a1a1a;--line:#3b3b3b;--tx:#ececec;--mu:#9a9a9a;--up:#5eead4;--dn:#fb923c;--ac:#e5e5e5}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 "Segoe UI",system-ui,sans-serif;padding:16px}
+.app{max-width:1100px;margin:auto;border:2px solid var(--ac);border-radius:28px;padding:20px;display:grid;gap:14px}
+.box{border:1.5px solid var(--line);border-radius:18px;padding:12px 14px;background:var(--panel)}
+h1{margin:0;font-size:22px;letter-spacing:.2px}
+.sub{color:var(--mu);font-size:12px}
+.top{display:grid;grid-template-columns:1fr 1.4fr;gap:14px}
+@media(max-width:760px){.top{grid-template-columns:1fr}.app{padding:12px;border-radius:20px}}
+label{display:block;color:var(--mu);font-size:12px;margin:6px 0 2px}
+input,select,button{background:#101010;color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;max-width:100%}
+button{cursor:pointer;background:var(--ac);color:#111;border:0;font-weight:600;padding:7px 14px}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--up);outline-offset:1px}
+.ghost{background:transparent;color:var(--tx);border:1px solid var(--line);font-weight:400;padding:5px 10px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}
+.checks label{display:inline-flex;gap:5px;align-items:center;color:var(--tx);margin:4px 12px 4px 0}
+.scroll{overflow:auto;max-height:300px;border-radius:10px}
+.big{max-height:460px}
+table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
+th,td{padding:5px 9px;text-align:right;white-space:nowrap;border-bottom:1px solid #262626}
+th:first-child,td:first-child{text-align:left}
+th{position:sticky;top:0;background:#222;cursor:pointer;user-select:none}
+.up{color:var(--up)}.dn{color:var(--dn)}
+#status{color:var(--mu);font-size:12px;min-height:18px}
+details summary{cursor:pointer;color:var(--mu);font-size:12px}
+</style>
+</head>
+<body>
+<main class="app">
+  <header class="box">
+    <h1>Floorsheet Scanner</h1>
+    <div class="sub">Reads daily .parquet files straight from a GitHub folder. Everything runs in your browser.</div>
+    <details>
+      <summary>Data source</summary>
+      <div class="row">
+        <div><label for="repo">Repo (owner/name)</label><input id="repo" value="AKT8/tradedata" placeholder="owner/name"></div>
+        <div><label for="dir">Folder</label><input id="dir" value="data" placeholder="data"></div>
+        <div><label for="branch">Branch</label><input id="branch" value="main" size="8"></div>
+      </div>
+    </details>
+  </header>
+
+  <section class="top">
+    <div class="box">
+      <label for="from">From</label><input type="date" id="from">
+      <label for="to">To</label><input type="date" id="to">
+    </div>
+    <div class="box">
+      <div class="checks">
+        <label><input type="checkbox" id="qHA" checked> Heikin Ashi changes</label>
+        <label><input type="checkbox" id="qVol" checked> Volume shockers</label>
+        <label><input type="checkbox" id="qVwap" checked> VWAP vs. season</label>
+        <label><input type="checkbox" id="qBB" checked> Bollinger %b breaks</label>
+      </div>
+      <div class="row">
+        <div><label for="mult">Shock at (× avg volume)</label><input id="mult" type="number" value="3" step="0.5" min="1" style="width:80px"></div>
+        <div><label for="look">Average over (days)</label><input id="look" type="number" value="20" min="2" style="width:80px"></div>
+        <div><label for="bbN">Bollinger period</label><input id="bbN" type="number" value="20" min="5" style="width:70px"></div>
+        <div><label for="bbK">Std devs</label><input id="bbK" type="number" value="2" step="0.5" min="0.5" style="width:70px"></div>
+        <div><label for="ord">If no time/ID column, rows are</label><select id="ord"><option value="desc">newest first</option><option value="asc">oldest first</option></select></div>
+        <button id="run">Load and scan</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="box">
+    <div class="row">
+      <div><label for="rawDay">Raw floorsheet for</label><select id="rawDay"></select></div>
+      <div><label for="rawSym">Symbol filter</label><input id="rawSym" placeholder="e.g. NABIL" size="10"></div>
+    </div>
+    <div class="scroll" id="raw"><div class="sub" style="padding:10px">Pick a date range and press Load and scan.</div></div>
+  </section>
+
+  <section class="box">
+    <div class="row" style="justify-content:space-between">
+      <div><strong>Scan results</strong> <span class="sub" id="count"></span></div>
+      <div><label for="show" style="display:inline">Show </label>
+        <select id="show">
+          <option value="all">All assets</option>
+          <option value="flags">Only flagged</option>
+        </select></div>
+    </div>
+    <div class="row" id="filters" style="margin-top:6px">
+      <div><label for="fHA">Heikin Ashi</label><select id="fHA"><option value="any">Any</option><option value="up">Green (up)</option><option value="down">Red (down)</option><option value="flip">Flipped on latest day</option><option value="flipup">Flipped to green</option><option value="flipdown">Flipped to red</option></select></div>
+      <div><label for="fPrev">Prev HA</label><select id="fPrev"><option value="any">Any</option><option value="up">Green</option><option value="down">Red</option><option value="inside">Inside prev body</option></select></div>
+      <div><label for="fBB">Bollinger %b</label><select id="fBB"><option value="any">Any</option><option value="above">Break above (&gt;1)</option><option value="below">Break below (&lt;0)</option><option value="break">Any break</option><option value="inside">Inside bands</option></select></div>
+      <div><label for="fVol">Volume</label><select id="fVol"><option value="any">Any</option><option value="shock">Shockers only</option></select></div>
+      <div><label for="fVw">Close vs VWAP</label><select id="fVw"><option value="any">Any</option><option value="above">Above</option><option value="below">Below</option></select></div>
+      <div><label for="fDays">Days in trend ≤</label><input id="fDays" type="number" min="1" placeholder="any" style="width:70px"></div>
+      <button class="ghost" id="resetF">Reset filters</button>
+    </div>
+    <div class="sub" style="margin:8px 0">Sort: <span id="sortInfo"></span> <button class="ghost" id="clearSort" style="margin-left:6px">Clear sort</button>
+      <span> · tap column headers one after another to combine sorts; tap again to flip, a third time to drop it</span></div>
+    <div id="status"></div>
+    <div class="scroll big" id="out"></div>
+  </section>
+</main>
+
+<script type="module">
+import {parquetReadObjects, asyncBufferFromUrl} from 'https://cdn.jsdelivr.net/npm/hyparquet/+esm';
+import {compressors} from 'https://cdn.jsdelivr.net/npm/hyparquet-compressors/+esm';
+
+const $ = id => document.getElementById(id);
+const DATE_RE = /(\d{4})[-_]?(\d{2})[-_]?(\d{2})/;
+const COLS = {
+  sym: ['symbol','stocksymbol','stock_symbol','scrip','ticker'],
+  px:  ['rate','price','contractrate','contract_rate'],
+  qty: ['quantity','qty','volume','contractquantity','contract_quantity','shares'],
+  amt: ['amount','contractamount','contract_amount','turnover','value']
+};
+const TIME = ['tradetime','trade_time','contracttime','contract_time','tradedatetime','time','timestamp','contractid','contract_id','transactionno','transaction_no','transactionid','tradeid'];
+const ordInfo = new Set(); let lastOrd = null;
+let days = new Map();   // date -> {raw:[], agg:Map(sym -> {o,h,l,c,v,a})}
+let results = [], sorts = [];
+const ASC_FIRST = new Set(['sym', 'streak']);   // everything else starts highest-first
+
+// remember settings
+for (const k of ['repo','dir','branch']) { const v = localStorage.getItem('fs_'+k); if (v) $(k).value = v; }
+
+const num = x => typeof x === 'bigint' ? Number(x) : Number(x);
+const fmt = (x, d = 2) => x == null || !isFinite(x) ? '–' : x.toLocaleString(undefined, {maximumFractionDigits: d});
+const pct = x => x == null || !isFinite(x) ? '–' : `<span class="${x >= 0 ? 'up' : 'dn'}">${x >= 0 ? '+' : ''}${x.toFixed(2)}%</span>`;
+
+function pick(keys, want) {
+  const m = new Map(keys.map(k => [k.toLowerCase().replace(/[\s]/g, ''), k]));
+  for (const w of want) if (m.has(w)) return m.get(w);
+  return null;
+}
+
+async function listFiles() {
+  const [repo, dir, branch] = [$('repo').value.trim(), $('dir').value.trim().replace(/^\/|\/$/g, ''), $('branch').value.trim() || 'main'];
+  if (!/^[^/]+\/[^/]+$/.test(repo)) throw new Error('Enter the repo as owner/name under Data source.');
+  for (const k of ['repo','dir','branch']) localStorage.setItem('fs_'+k, $(k).value);
+  // one request returns every file in the repo, including year subfolders
+  const r = await fetch(`https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`);
+  if (!r.ok) throw new Error(`GitHub returned ${r.status}. Check the repo and branch (the repo must be public), or wait if you hit the rate limit.`);
+  const {tree} = await r.json();
+  const prefix = dir ? dir + '/' : '';
+  return tree.filter(f => f.type === 'blob' && f.path.startsWith(prefix) && f.path.endsWith('.parquet')).map(f => {
+    const m = f.path.split('/').pop().match(DATE_RE);
+    return m && {date: `${m[1]}-${m[2]}-${m[3]}`, url: `https://raw.githubusercontent.com/${repo}/${branch}/${f.path}`};
+  }).filter(Boolean).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function loadDay(f) {
+  if (days.has(f.date)) return;
+  const file = await asyncBufferFromUrl({url: f.url});
+  const rows = await parquetReadObjects({file, compressors});
+  if (!rows.length) { days.set(f.date, {raw: [], agg: new Map()}); return; }
+  const keys = Object.keys(rows[0]);
+  const c = Object.fromEntries(Object.entries(COLS).map(([k, w]) => [k, pick(keys, w)]));
+  if (!c.sym || !c.px || !c.qty) throw new Error(`${f.date}: couldn't find symbol, rate and quantity columns. Found: ${keys.join(', ')}`);
+  c.t = pick(keys, TIME);
+  let ordered = rows;   // open = first trade of the day, close = last trade, so rows must be oldest -> newest
+  if (c.t) {
+    const key = r => { const v = r[c.t]; return v instanceof Date ? v.getTime() : typeof v === 'bigint' ? Number(v) : v; };
+    ordered = rows.slice().sort((a, b) => { const x = key(a), y = key(b);
+      return typeof x === 'string' || typeof y === 'string' ? String(x).localeCompare(String(y), undefined, {numeric: true}) : x - y; });
+    ordInfo.add(`sorted by ${c.t}`);
+  } else if ($('ord').value === 'desc') { ordered = rows.slice().reverse(); ordInfo.add('file reversed (newest first)'); }
+  else ordInfo.add('file order (oldest first)');
+  const agg = new Map();
+  for (const r of ordered) {
+    const s = String(r[c.sym]), p = num(r[c.px]), q = num(r[c.qty]);
+    const a = c.amt ? num(r[c.amt]) : p * q;
+    if (!isFinite(p) || !isFinite(q)) continue;
+    const g = agg.get(s);
+    if (!g) agg.set(s, {o: p, h: p, l: p, c: p, v: q, a});
+    else { g.h = Math.max(g.h, p); g.l = Math.min(g.l, p); g.c = p; g.v += q; g.a += a; }
+  }
+  days.set(f.date, {raw: rows, agg, cols: c});
+}
+
+async function pool(items, n, fn, tick) {
+  let i = 0, done = 0;
+  await Promise.all(Array.from({length: n}, async () => {
+    while (i < items.length) { const it = items[i++]; await fn(it); tick(++done); }
+  }));
+}
+
+function analyse(dates, look, mult, bbN, bbK) {
+  const syms = new Set();
+  dates.forEach(d => days.get(d).agg.forEach((_, s) => syms.add(s)));
+  const out = [];
+  for (const s of syms) {
+    const ser = dates.map(d => ({d, ...days.get(d).agg.get(s)})).filter(x => x.c != null);
+    if (!ser.length) continue;
+    // Heikin Ashi
+    let pO, pC, trend = [], flipDate = null;
+    ser.forEach((x, i) => {
+      const hc = (x.o + x.h + x.l + x.c) / 4;
+      const ho = i ? (pO + pC) / 2 : (x.o + x.c) / 2;
+      x.ha = hc >= ho ? 1 : -1; x.ho = ho; x.hc = hc;
+      if (i && x.ha !== ser[i - 1].ha) flipDate = x.d;
+      pO = ho; pC = hc;
+    });
+    const last = ser[ser.length - 1], prev = ser[ser.length - 2];
+    const haFlip = prev && last.ha !== prev.ha;
+    // streak length
+    let streak = 1; for (let i = ser.length - 2; i >= 0 && ser[i].ha === last.ha; i--) streak++;
+    // gain from the flip day's close (first day of the current trend) to the latest close
+    const trendGain = (last.c / ser[ser.length - streak].c - 1) * 100;
+    // previous HA candle direction, and whether today's HA body sits inside yesterday's body
+    const prevHa = prev ? prev.ha : 0;
+    const inside = !!prev && Math.max(last.ho, last.hc) <= Math.max(prev.ho, prev.hc) && Math.min(last.ho, last.hc) >= Math.min(prev.ho, prev.hc);
+    // Bollinger %b on daily closes: <0 below lower band, >1 above upper band
+    let pb = null;
+    if (ser.length >= bbN) {
+      const w = ser.slice(-bbN).map(x => x.c), m = w.reduce((t, x) => t + x, 0) / bbN;
+      const sd = Math.sqrt(w.reduce((t, x) => t + (x - m) ** 2, 0) / bbN);
+      if (sd > 0) pb = (last.c - (m - bbK * sd)) / (2 * bbK * sd);
+    }
+    const bbBreak = pb == null ? 0 : pb > 1 ? 1 : pb < 0 ? -1 : 0;
+    // Volume shock
+    const hist = ser.slice(-look - 1, -1);
+    const avgV = hist.length ? hist.reduce((t, x) => t + x.v, 0) / hist.length : null;
+    const vx = avgV ? last.v / avgV : null;
+    // VWAP: whole range, last day, and month-over-month ("seasonal") change
+    const tv = ser.reduce((t, x) => t + x.v, 0), ta = ser.reduce((t, x) => t + x.a, 0);
+    const vwap = ta / tv, lastVwap = last.a / last.v;
+    const mon = {};
+    ser.forEach(x => { const m = x.d.slice(0, 7); (mon[m] ||= {v: 0, a: 0}); mon[m].v += x.v; mon[m].a += x.a; });
+    const ms = Object.keys(mon).sort();
+    const mv = m => mon[m].a / mon[m].v;
+    const mChg = ms.length > 1 ? (mv(ms[ms.length - 1]) / mv(ms[ms.length - 2]) - 1) * 100 : null;
+    out.push({
+      sym: s, close: last.c, ha: last.ha, haFlip, streak, flipDate, trendGain, prevHa, inside, pb, bbBreak,
+      vol: last.v, avgV, vx, shock: vx != null && vx >= mult,
+      vwap, lastVwap, dev: (last.c / vwap - 1) * 100, mChg
+    });
+  }
+  return out;
+}
+
+function renderOut() {
+  const q = {ha: $('qHA').checked, vol: $('qVol').checked, vw: $('qVwap').checked, bb: $('qBB').checked};
+  let rows = results.filter(r => $('show').value === 'all' || (q.ha && r.haFlip) || (q.vol && r.shock) || (q.bb && r.bbBreak));
+  const cols = [['sym', 'Symbol'], ['close', 'Close']];
+  if (q.ha) cols.push(['ha', 'Heikin Ashi'], ['prevHa', 'Prev HA'], ['streak', 'Days in trend'], ['trendGain', 'Gain in trend'], ['flipDate', 'Last flip']);
+  if (q.vol) cols.push(['vol', 'Volume'], ['avgV', 'Avg volume'], ['vx', 'Volume ×']);
+  if (q.bb) cols.push(['pb', '%b']);
+  if (q.vw) cols.push(['vwap', 'VWAP (range)'], ['lastVwap', 'VWAP (last day)'], ['dev', 'Close vs VWAP'], ['mChg', 'Monthly VWAP Δ']);
+  const P = {
+    fHA: {up: r => r.ha > 0, down: r => r.ha < 0, flip: r => r.haFlip, flipup: r => r.haFlip && r.ha > 0, flipdown: r => r.haFlip && r.ha < 0},
+    fPrev: {up: r => r.prevHa > 0, down: r => r.prevHa < 0, inside: r => r.inside},
+    fBB: {above: r => r.bbBreak > 0, below: r => r.bbBreak < 0, break: r => r.bbBreak !== 0, inside: r => r.pb != null && r.bbBreak === 0},
+    fVol: {shock: r => r.shock},
+    fVw: {above: r => r.dev > 0, below: r => r.dev < 0}
+  };
+  for (const id in P) { const v = $(id).value; if (v !== 'any') rows = rows.filter(P[id][v]); }
+  const maxDays = +$('fDays').value; if (maxDays) rows = rows.filter(r => r.streak <= maxDays);
+  const lab = Object.fromEntries(cols);
+  sorts = sorts.filter(x => lab[x.k]);              // drop sorts on hidden columns
+  rows.sort((a, b) => {
+    for (const {k, d} of sorts) {
+      const x = a[k], y = b[k];
+      if ((x == null) !== (y == null)) return x == null ? 1 : -1;
+      if (x == null) continue;
+      const c = typeof x === 'string' ? x.localeCompare(y) : x - y;
+      if (c) return c * d;
+    }
+    return a.sym.localeCompare(b.sym);
+  });
+  $('sortInfo').textContent = sorts.length ? sorts.map((x, i) => `${i + 1}. ${lab[x.k]} ${x.d > 0 ? '↑' : '↓'}`).join('  ›  ') : 'none (A–Z by symbol)';
+  const arrow = k => { const i = sorts.findIndex(x => x.k === k); return i < 0 ? '' : ` ${sorts[i].d > 0 ? '↑' : '↓'}${sorts.length > 1 ? i + 1 : ''}`; };
+  const cell = {
+    sym: r => `<strong>${r.sym}</strong>`, close: r => fmt(r.close),
+    ha: r => `<span class="${r.ha > 0 ? 'up' : 'dn'}">${r.ha > 0 ? '▲ up' : '▼ down'}${r.haFlip ? ' (flipped)' : ''}</span>`,
+    streak: r => r.streak, trendGain: r => pct(r.trendGain),
+    prevHa: r => r.prevHa ? `<span class="${r.prevHa > 0 ? 'up' : 'dn'}">${r.prevHa > 0 ? '▲' : '▼'}</span>${r.inside ? ' <span class="sub">inside</span>' : ''}` : '–',
+    pb: r => r.pb == null ? '–' : `<span class="${r.bbBreak > 0 ? 'up' : r.bbBreak < 0 ? 'dn' : ''}">${r.pb.toFixed(2)}${r.bbBreak > 0 ? ' ▲ break' : r.bbBreak < 0 ? ' ▼ break' : ''}</span>`, flipDate: r => r.flipDate || '–',
+    vol: r => fmt(r.vol, 0), avgV: r => fmt(r.avgV, 0),
+    vx: r => `<span class="${r.shock ? 'up' : ''}">${fmt(r.vx)}×</span>`,
+    vwap: r => fmt(r.vwap), lastVwap: r => fmt(r.lastVwap), dev: r => pct(r.dev), mChg: r => pct(r.mChg)
+  };
+  $('count').textContent = `${rows.length} of ${results.length} assets`;
+  $('out').innerHTML = `<table><thead><tr>${cols.map(([k, t]) => `<th data-k="${k}">${t}${arrow(k)}</th>`).join('')}</tr></thead><tbody>${
+    rows.map(r => `<tr>${cols.map(([k]) => `<td>${cell[k](r)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  $('out').querySelectorAll('th').forEach(th => th.onclick = () => {
+    const k = th.dataset.k, i = sorts.findIndex(x => x.k === k);
+    if (i < 0) sorts.push({k, d: ASC_FIRST.has(k) ? 1 : -1});
+    else if (sorts[i].d === (ASC_FIRST.has(k) ? 1 : -1)) sorts[i].d = -sorts[i].d;
+    else sorts.splice(i, 1);
+    renderOut();
+  });
+}
+
+function renderRaw() {
+  const d = days.get($('rawDay').value); if (!d) return;
+  const f = $('rawSym').value.trim().toUpperCase();
+  const sc = d.cols && d.cols.sym;
+  const rows = (f && sc ? d.raw.filter(r => String(r[sc]).toUpperCase().includes(f)) : d.raw).slice(0, 500);
+  if (!rows.length) { $('raw').innerHTML = '<div class="sub" style="padding:10px">No rows match.</div>'; return; }
+  const keys = Object.keys(rows[0]);
+  $('raw').innerHTML = `<table><thead><tr>${keys.map(k => `<th>${k}</th>`).join('')}</tr></thead><tbody>${
+    rows.map(r => `<tr>${keys.map(k => `<td>${typeof r[k] === 'bigint' ? r[k] : (r[k] instanceof Date ? r[k].toISOString().slice(0, 10) : r[k] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+}
+
+$('run').onclick = async () => {
+  const st = $('status'); $('run').disabled = true;
+  if (lastOrd !== $('ord').value) { days.clear(); ordInfo.clear(); lastOrd = $('ord').value; } st.textContent = 'Listing files…';
+  try {
+    const all = await listFiles();
+    if (!all.length) throw new Error('No .parquet files with a date in the name were found in that folder.');
+    if (!$('from').value) $('from').value = all[Math.max(0, all.length - 30)].date;
+    if (!$('to').value) $('to').value = all[all.length - 1].date;
+    const sel = all.filter(f => f.date >= $('from').value && f.date <= $('to').value);
+    if (!sel.length) throw new Error('No files fall inside that date range.');
+    await pool(sel, 4, loadDay, n => st.textContent = `Loaded ${n} of ${sel.length} days…`);
+    const dates = sel.map(f => f.date);
+    $('rawDay').innerHTML = [...dates].reverse().map(d => `<option>${d}</option>`).join('');
+    renderRaw();
+    results = analyse(dates, Math.max(2, +$('look').value), +$('mult').value || 3, Math.max(5, +$('bbN').value || 20), +$('bbK').value || 2);
+    st.textContent = `${dates.length} trading days, ${dates[0]} to ${dates[dates.length - 1]}. Trade order: ${[...ordInfo].join(', ')}.`;
+    renderOut();
+  } catch (e) { st.textContent = e.message; }
+  $('run').disabled = false;
+};
+['qHA', 'qVol', 'qVwap', 'qBB', 'show', 'fHA', 'fPrev', 'fBB', 'fVol', 'fVw'].forEach(id => $(id).onchange = () => results.length && renderOut());
+$('fDays').oninput = () => results.length && renderOut();
+$('resetF').onclick = () => { ['fHA', 'fPrev', 'fBB', 'fVol', 'fVw'].forEach(id => $(id).value = 'any'); $('fDays').value = ''; $('show').value = 'all'; results.length && renderOut(); };
+$('clearSort').onclick = () => { sorts = []; results.length && renderOut(); };
+$('rawDay').onchange = renderRaw;
+$('rawSym').oninput = renderRaw;
+</script>
+</body>
+</html>
