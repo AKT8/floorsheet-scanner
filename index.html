@@ -27,6 +27,11 @@ table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:
 th,td{padding:5px 9px;text-align:right;white-space:nowrap;border-bottom:1px solid #262626}
 th:first-child,td:first-child{text-align:left}
 th{position:sticky;top:0;background:#222;cursor:pointer;user-select:none}
+#out tbody tr{cursor:pointer}
+#out tbody tr:hover{background:#242424}
+#out tbody tr.chart-selected{background:#20302e;outline:1px solid var(--up)}
+.chart-link{display:inline-block;text-decoration:none;background:#101010;color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+.chart-link:hover{border-color:var(--up)}
 .up{color:var(--up)}.dn{color:var(--dn)}
 #status{color:var(--mu);font-size:12px;min-height:18px}
 details summary{cursor:pointer;color:var(--mu);font-size:12px}
@@ -71,14 +76,6 @@ details summary{cursor:pointer;color:var(--mu);font-size:12px}
   </section>
 
   <section class="box">
-    <div class="row">
-      <div><label for="rawDay">Raw floorsheet for</label><select id="rawDay"></select></div>
-      <div><label for="rawSym">Symbol filter</label><input id="rawSym" placeholder="e.g. NABIL" size="10"></div>
-    </div>
-    <div class="scroll" id="raw"><div class="sub" style="padding:10px">Pick a date range and press Load and scan.</div></div>
-  </section>
-
-  <section class="box">
     <div class="row" style="justify-content:space-between">
       <div><strong>Scan results</strong> <span class="sub" id="count"></span></div>
       <div><label for="show" style="display:inline">Show </label>
@@ -100,6 +97,31 @@ details summary{cursor:pointer;color:var(--mu);font-size:12px}
       <span> · tap column headers one after another to combine sorts; tap again to flip, a third time to drop it</span></div>
     <div id="status"></div>
     <div class="scroll big" id="out"></div>
+  </section>
+
+  <section class="box" id="chartSection">
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div>
+        <strong>TradingView charts</strong>
+        <div class="sub">Click a scan-result row to select a symbol, then open its chart. You can also open charts for the filtered results.</div>
+      </div>
+      <div class="row">
+        <button class="ghost" id="chartSelected" disabled>Chart selected symbol</button>
+        <button id="chartResults" disabled>Chart filtered results</button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div>
+        <label for="chartSymbol">Selected symbol</label>
+        <input id="chartSymbol" placeholder="Click a scan-result row" readonly size="28">
+      </div>
+      <div>
+        <label for="chartExchange">TradingView exchange prefix</label>
+        <input id="chartExchange" value="NEPSE" size="10">
+      </div>
+    </div>
+    <div class="sub" id="chartStatus" style="margin-top:8px">Run a scan, then click a symbol in the results table.</div>
+    <div id="chartLinks" class="row" style="margin-top:8px"></div>
   </section>
 </main>
 
@@ -283,6 +305,14 @@ function renderOut() {
   $('count').textContent = `${rows.length} of ${results.length} assets`;
   $('out').innerHTML = `<table><thead><tr>${cols.map(([k, t]) => `<th data-k="${k}">${t}${arrow(k)}</th>`).join('')}</tr></thead><tbody>${
     rows.map(r => `<tr>${cols.map(([k]) => `<td>${cell[k](r)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  $('out').querySelectorAll('tbody tr').forEach((tr, i) => {
+    tr.dataset.symbol = rows[i].sym;
+    tr.onclick = () => selectChartRow(rows[i].sym);
+  });
+  if (selectedChartSymbol && !rows.some(r => r.sym === selectedChartSymbol)) selectedChartSymbol = null;
+  if (selectedChartSymbol) $('out').querySelectorAll('tbody tr').forEach(tr => {
+    tr.classList.toggle('chart-selected', tr.dataset.symbol === selectedChartSymbol);
+  });
   $('out').querySelectorAll('th').forEach(th => th.onclick = () => {
     const k = th.dataset.k, i = sorts.findIndex(x => x.k === k);
     if (i < 0) sorts.push({k, d: ASC_FIRST.has(k) ? 1 : -1});
@@ -290,18 +320,66 @@ function renderOut() {
     else sorts.splice(i, 1);
     renderOut();
   });
+  updateChartControls();
 }
 
-function renderRaw() {
-  const d = days.get($('rawDay').value); if (!d) return;
-  const f = $('rawSym').value.trim().toUpperCase();
-  const sc = d.cols && d.cols.sym;
-  const rows = (f && sc ? d.raw.filter(r => String(r[sc]).toUpperCase().includes(f)) : d.raw).slice(0, 500);
-  if (!rows.length) { $('raw').innerHTML = '<div class="sub" style="padding:10px">No rows match.</div>'; return; }
-  const keys = Object.keys(rows[0]);
-  $('raw').innerHTML = `<table><thead><tr>${keys.map(k => `<th>${k}</th>`).join('')}</tr></thead><tbody>${
-    rows.map(r => `<tr>${keys.map(k => `<td>${typeof r[k] === 'bigint' ? r[k] : (r[k] instanceof Date ? r[k].toISOString().slice(0, 10) : r[k] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+let selectedChartSymbol = null;
+
+function currentVisibleResults() {
+  const q = {ha: $('qHA').checked, vol: $('qVol').checked, bb: $('qBB').checked};
+  let rows = results.filter(r => $('show').value === 'all' || (q.ha && r.haFlip) || (q.vol && r.shock) || (q.bb && r.bbBreak));
+  const P = {
+    fHA: {up: r => r.ha > 0, down: r => r.ha < 0, flip: r => r.haFlip, flipup: r => r.haFlip && r.ha > 0, flipdown: r => r.haFlip && r.ha < 0},
+    fPrev: {up: r => r.prevHa > 0, down: r => r.prevHa < 0, inside: r => r.inside},
+    fBB: {above: r => r.bbBreak > 0, below: r => r.bbBreak < 0, break: r => r.bbBreak !== 0, inside: r => r.pb != null && r.bbBreak === 0},
+    fVol: {shock: r => r.shock},
+    fVw: {above: r => r.dev > 0, below: r => r.dev < 0}
+  };
+  for (const id in P) { const v = $(id).value; if (v !== 'any') rows = rows.filter(P[id][v]); }
+  const maxDays = +$('fDays').value;
+  if (maxDays) rows = rows.filter(r => r.streak <= maxDays);
+  return rows;
 }
+
+function tradingViewUrl(symbol) {
+  const exchange = $('chartExchange').value.trim().replace(/[^A-Za-z0-9_]/g, '') || 'NEPSE';
+  return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(exchange + ':' + symbol)}`;
+}
+
+function updateChartControls() {
+  $('chartSymbol').value = selectedChartSymbol || '';
+  $('chartSelected').disabled = !selectedChartSymbol;
+  const rows = currentVisibleResults();
+  $('chartResults').disabled = !rows.length;
+  $('chartStatus').textContent = rows.length
+    ? `${rows.length} symbol(s) currently match the scan filters.`
+    : 'No scan results match the current filters.';
+  $('chartLinks').innerHTML = selectedChartSymbol
+    ? `<a class="chart-link" href="${tradingViewUrl(selectedChartSymbol)}" target="_blank" rel="noopener noreferrer">Open ${selectedChartSymbol} in TradingView ↗</a>`
+    : '';
+}
+
+function selectChartRow(symbol) {
+  selectedChartSymbol = symbol;
+  $('out').querySelectorAll('tbody tr').forEach(tr => {
+    tr.classList.toggle('chart-selected', tr.dataset.symbol === symbol);
+  });
+  updateChartControls();
+}
+
+$('chartSelected').onclick = () => {
+  if (selectedChartSymbol) window.open(tradingViewUrl(selectedChartSymbol), '_blank', 'noopener,noreferrer');
+};
+
+$('chartResults').onclick = () => {
+  const rows = currentVisibleResults();
+  if (!rows.length) return;
+  const limit = Math.min(rows.length, 12);
+  rows.slice(0, limit).forEach(r => window.open(tradingViewUrl(r.sym), '_blank', 'noopener,noreferrer'));
+  $('chartStatus').textContent = `Requested charts for ${limit} of ${rows.length} matching symbols. If tabs are blocked, allow pop-ups or open symbols individually.`;
+};
+
+$('chartExchange').onchange = updateChartControls;
 
 $('run').onclick = async () => {
   const st = $('status'); $('run').disabled = true;
@@ -315,8 +393,6 @@ $('run').onclick = async () => {
     if (!sel.length) throw new Error('No files fall inside that date range.');
     await pool(sel, 4, loadDay, n => st.textContent = `Loaded ${n} of ${sel.length} days…`);
     const dates = sel.map(f => f.date);
-    $('rawDay').innerHTML = [...dates].reverse().map(d => `<option>${d}</option>`).join('');
-    renderRaw();
     results = analyse(dates, Math.max(2, +$('look').value), +$('mult').value || 3, Math.max(5, +$('bbN').value || 20), +$('bbK').value || 2);
     st.textContent = `${dates.length} trading days, ${dates[0]} to ${dates[dates.length - 1]}. Trade order: ${[...ordInfo].join(', ')}.`;
     renderOut();
@@ -327,8 +403,6 @@ $('run').onclick = async () => {
 $('fDays').oninput = () => results.length && renderOut();
 $('resetF').onclick = () => { ['fHA', 'fPrev', 'fBB', 'fVol', 'fVw'].forEach(id => $(id).value = 'any'); $('fDays').value = ''; $('show').value = 'all'; results.length && renderOut(); };
 $('clearSort').onclick = () => { sorts = []; results.length && renderOut(); };
-$('rawDay').onchange = renderRaw;
-$('rawSym').oninput = renderRaw;
 </script>
 </body>
 </html>
