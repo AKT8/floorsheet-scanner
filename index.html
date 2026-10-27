@@ -30,8 +30,8 @@ th{position:sticky;top:0;background:#222;cursor:pointer;user-select:none}
 #out tbody tr{cursor:pointer}
 #out tbody tr:hover{background:#242424}
 #out tbody tr.chart-selected{background:#20302e;outline:1px solid var(--up)}
-.chart-link{display:inline-block;text-decoration:none;background:#101010;color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
-.chart-link:hover{border-color:var(--up)}
+.price-chart{width:100%;height:460px;min-height:300px;margin-top:10px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#101010}
+.price-chart{position:relative}\n#priceChart{min-width:0}\n.chart-readout{display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:8px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted)}\n.chart-readout strong{color:var(--text)}
 .up{color:var(--up)}.dn{color:var(--dn)}
 #status{color:var(--mu);font-size:12px;min-height:18px}
 details summary{cursor:pointer;color:var(--mu);font-size:12px}
@@ -102,29 +102,39 @@ details summary{cursor:pointer;color:var(--mu);font-size:12px}
   <section class="box" id="chartSection">
     <div class="row" style="justify-content:space-between;align-items:center">
       <div>
-        <strong>TradingView charts</strong>
-        <div class="sub">Click a scan-result row to select a symbol, then open its chart. You can also open charts for the filtered results.</div>
+        <strong>In-page candlestick chart</strong>
+        <div class="sub">Uses the scanner's own daily OHLCV data. Select a scan-result row to chart that symbol.</div>
       </div>
       <div class="row">
-        <button class="ghost" id="chartSelected" disabled>Chart selected symbol</button>
-        <button id="chartResults" disabled>Chart filtered results</button>
+        <label for="chartInterval" style="margin:0">Interval</label>
+        <select id="chartInterval">
+          <option value="D">Daily</option>
+        </select>
+        <button class="ghost" id="chartReload" disabled>Refresh chart</button>
       </div>
     </div>
     <div class="row" style="margin-top:10px">
       <div>
         <label for="chartSymbol">Selected symbol</label>
-        <input id="chartSymbol" placeholder="Click a scan-result row" readonly size="28">
+        <input id="chartSymbol" placeholder="Click a scan-result row" readonly size="22">
       </div>
       <div>
-        <label for="chartExchange">TradingView exchange prefix</label>
-        <input id="chartExchange" value="NEPSE" size="10">
+        <label for="chartIndicators">Overlay indicators</label>
+        <select id="chartIndicators">
+          <option value="ha">Heikin Ashi</option>
+          <option value="sma">SMA 20</option>
+          <option value="both" selected>Heikin Ashi + SMA 20</option>
+          <option value="none">Candles only</option>
+        </select>
       </div>
     </div>
     <div class="sub" id="chartStatus" style="margin-top:8px">Run a scan, then click a symbol in the results table.</div>
-    <div id="chartLinks" class="row" style="margin-top:8px"></div>
+    <div id="priceChart" class="price-chart"><div class="sub" style="padding:16px">Chart will appear here after selecting a symbol.</div></div>\n    <div id="chartReadout" class="chart-readout" aria-live="polite"></div>
+    <div class="sub">Chart data is aggregated from the selected date range already loaded by this scanner. It is not a TradingView data feed.</div>
   </section>
 </main>
 
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <script type="module">
 import {parquetReadObjects, asyncBufferFromUrl} from 'https://cdn.jsdelivr.net/npm/hyparquet/+esm';
 import {compressors} from 'https://cdn.jsdelivr.net/npm/hyparquet-compressors/+esm';
@@ -320,10 +330,15 @@ function renderOut() {
     else sorts.splice(i, 1);
     renderOut();
   });
-  updateChartControls();
+  if (selectedChartSymbol) renderPriceChart();
 }
 
 let selectedChartSymbol = null;
+let priceChart = null;
+let candleSeries = null;
+let smaSeries = null;
+let volumeSeries = null;
+let chartResizeObserver = null;
 
 function currentVisibleResults() {
   const q = {ha: $('qHA').checked, vol: $('qVol').checked, bb: $('qBB').checked};
@@ -341,22 +356,205 @@ function currentVisibleResults() {
   return rows;
 }
 
-function tradingViewUrl(symbol) {
-  const exchange = $('chartExchange').value.trim().replace(/[^A-Za-z0-9_]/g, '') || 'NEPSE';
-  return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(exchange + ':' + symbol)}`;
+function getSeriesForSymbol(symbol) {
+  const dates = [...days.keys()].sort();
+  return dates.map(date => {
+    const x = days.get(date)?.agg.get(symbol);
+    return x ? {date, ...x} : null;
+  }).filter(Boolean);
 }
 
-function updateChartControls() {
-  $('chartSymbol').value = selectedChartSymbol || '';
-  $('chartSelected').disabled = !selectedChartSymbol;
-  const rows = currentVisibleResults();
-  $('chartResults').disabled = !rows.length;
-  $('chartStatus').textContent = rows.length
-    ? `${rows.length} symbol(s) currently match the scan filters.`
-    : 'No scan results match the current filters.';
-  $('chartLinks').innerHTML = selectedChartSymbol
-    ? `<a class="chart-link" href="${tradingViewUrl(selectedChartSymbol)}" target="_blank" rel="noopener noreferrer">Open ${selectedChartSymbol} in TradingView ↗</a>`
-    : '';
+function removePriceChart() {
+  if (chartResizeObserver) {
+    chartResizeObserver.disconnect();
+    chartResizeObserver = null;
+  }
+  if (priceChart) {
+    priceChart.remove();
+    priceChart = null;
+  }
+  candleSeries = null;
+  smaSeries = null;
+  volumeSeries = null;
+}
+
+function makeHeikinAshi(series) {
+  let previousOpen = null;
+  let previousClose = null;
+  return series.map((x) => {
+    const close = (x.o + x.h + x.l + x.c) / 4;
+    const open = previousOpen == null
+      ? (x.o + x.c) / 2
+      : (previousOpen + previousClose) / 2;
+    const candle = {
+      time: x.date,
+      open,
+      high: Math.max(x.h, open, close),
+      low: Math.min(x.l, open, close),
+      close
+    };
+    previousOpen = open;
+    previousClose = close;
+    return candle;
+  });
+}
+
+function renderPriceChart() {
+  const symbol = selectedChartSymbol;
+  $('chartSymbol').value = symbol || '';
+  $('chartReload').disabled = !symbol;
+  removePriceChart();
+  $('chartReadout').textContent = '';
+
+  if (!symbol) {
+    $('priceChart').innerHTML = '<div class="sub" style="padding:16px">Click a scan-result row to display its chart.</div>';
+    $('chartStatus').textContent = 'No symbol selected.';
+    return;
+  }
+
+  const series = getSeriesForSymbol(symbol);
+  if (!series.length) {
+    $('priceChart').innerHTML = '<div class="sub" style="padding:16px">No OHLC data available for this symbol.</div>';
+    $('chartStatus').textContent = `No OHLC data available for ${symbol} in the loaded dates.`;
+    return;
+  }
+
+  if (!window.LightweightCharts) {
+    $('chartStatus').textContent = 'TradingView Lightweight Charts failed to load. Check your internet connection and refresh.';
+    return;
+  }
+
+  const mode = $('chartIndicators').value;
+  const useHA = mode === 'ha' || mode === 'both';
+  const useSMA = mode === 'sma' || mode === 'both';
+  const candles = useHA ? makeHeikinAshi(series) : series.map(x => ({
+    time: x.date, open: x.o, high: x.h, low: x.l, close: x.c
+  }));
+  const sma = series.map((x, i) => {
+    if (i < 19) return null;
+    return {time: x.date, value: series.slice(i - 19, i + 1).reduce((sum, item) => sum + item.c, 0) / 20};
+  }).filter(Boolean);
+
+  $('priceChart').innerHTML = '';
+  const host = $('priceChart');
+  const chart = LightweightCharts.createChart(host, {
+    width: Math.max(host.clientWidth, 320),
+    height: 460,
+    layout: {
+      background: {type: 'solid', color: '#101010'},
+      textColor: '#b8b8b8',
+      fontFamily: 'Arial, sans-serif'
+    },
+    grid: {
+      vertLines: {color: '#242424'},
+      horzLines: {color: '#242424'}
+    },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Normal,
+      vertLine: {color: '#777777', width: 1, style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: '#444444'},
+      horzLine: {color: '#777777', width: 1, style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: '#444444'}
+    },
+    rightPriceScale: {
+      borderColor: '#3a3a3a',
+      scaleMargins: {top: 0.08, bottom: 0.24}
+    },
+    timeScale: {
+      borderColor: '#3a3a3a',
+      timeVisible: false,
+      secondsVisible: false,
+      rightOffset: 3,
+      barSpacing: 9,
+      minBarSpacing: 3,
+      fixLeftEdge: false,
+      fixRightEdge: false
+    },
+    handleScroll: {mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false},
+    handleScale: {mouseWheel: true, pinch: true, axisPressedMouseMove: true}
+  });
+  priceChart = chart;
+
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#26a69a',
+    downColor: '#ef5350',
+    borderUpColor: '#26a69a',
+    borderDownColor: '#ef5350',
+    wickUpColor: '#26a69a',
+    wickDownColor: '#ef5350',
+    priceLineVisible: true,
+    lastValueVisible: true
+  });
+  candleSeries.setData(candles);
+
+  if (useSMA) {
+    smaSeries = chart.addLineSeries({
+      title: 'SMA 20',
+      color: '#60a5fa',
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: true
+    });
+    smaSeries.setData(sma);
+  }
+
+  volumeSeries = chart.addHistogramSeries({
+    priceScaleId: 'volume',
+    priceFormat: {type: 'volume'},
+    priceLineVisible: false,
+    lastValueVisible: false,
+    base: 0
+  });
+  volumeSeries.setData(series.map((x, i) => ({
+    time: x.date,
+    value: Number(x.v) || 0,
+    color: candles[i].close >= candles[i].open ? 'rgba(38,166,154,0.55)' : 'rgba(239,83,80,0.55)'
+  })));
+  chart.priceScale('volume').applyOptions({
+    scaleMargins: {top: 0.82, bottom: 0},
+    borderVisible: false
+  });
+
+  chart.timeScale().fitContent();
+
+  const fmt = value => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toLocaleString(undefined, {maximumFractionDigits: 2});
+  const initial = series[series.length - 1];
+  $('chartReadout').innerHTML =
+    `<span><strong>${initial.date}</strong></span>` +
+    `<span>O <strong>${fmt(candles[candles.length - 1].open)}</strong></span>` +
+    `<span>H <strong>${fmt(candles[candles.length - 1].high)}</strong></span>` +
+    `<span>L <strong>${fmt(candles[candles.length - 1].low)}</strong></span>` +
+    `<span>C <strong>${fmt(candles[candles.length - 1].close)}</strong></span>` +
+    `<span>Vol <strong>${fmt(initial.v)}</strong></span>`;
+
+  chart.subscribeCrosshairMove(param => {
+    if (!param || !param.time || !param.seriesData) return;
+    const candle = param.seriesData.get(candleSeries);
+    if (!candle || candle.open == null) return;
+    const date = typeof param.time === 'string' ? param.time :
+      `${param.time.year}-${String(param.time.month).padStart(2, '0')}-${String(param.time.day).padStart(2, '0')}`;
+    const original = series.find(x => x.date === date);
+    const volume = original ? original.v : null;
+    $('chartReadout').innerHTML =
+      `<span><strong>${date}</strong></span>` +
+      `<span>O <strong>${fmt(candle.open)}</strong></span>` +
+      `<span>H <strong>${fmt(candle.high)}</strong></span>` +
+      `<span>L <strong>${fmt(candle.low)}</strong></span>` +
+      `<span>C <strong>${fmt(candle.close)}</strong></span>` +
+      `<span>Vol <strong>${fmt(volume)}</strong></span>` +
+      (useSMA && param.seriesData.get(smaSeries)?.value != null
+        ? `<span>SMA20 <strong>${fmt(param.seriesData.get(smaSeries).value)}</strong></span>` : '');
+  });
+
+  chartResizeObserver = new ResizeObserver(entries => {
+    const width = Math.floor(entries[0]?.contentRect?.width || host.clientWidth);
+    if (width > 0 && priceChart) priceChart.applyOptions({width});
+  });
+  chartResizeObserver.observe(host);
+
+  $('chartStatus').textContent =
+    `${symbol} · ${series.length} daily candles · ${series[0].date} to ${series[series.length - 1].date} · ` +
+    `${useHA ? 'Heikin Ashi' : 'regular OHLC'}${useSMA ? ' + SMA 20' : ''} · ` +
+    'Scroll to zoom; drag to pan; use the crosshair to inspect candles.';
 }
 
 function selectChartRow(symbol) {
@@ -364,22 +562,11 @@ function selectChartRow(symbol) {
   $('out').querySelectorAll('tbody tr').forEach(tr => {
     tr.classList.toggle('chart-selected', tr.dataset.symbol === symbol);
   });
-  updateChartControls();
+  renderPriceChart();
 }
 
-$('chartSelected').onclick = () => {
-  if (selectedChartSymbol) window.open(tradingViewUrl(selectedChartSymbol), '_blank', 'noopener,noreferrer');
-};
-
-$('chartResults').onclick = () => {
-  const rows = currentVisibleResults();
-  if (!rows.length) return;
-  const limit = Math.min(rows.length, 12);
-  rows.slice(0, limit).forEach(r => window.open(tradingViewUrl(r.sym), '_blank', 'noopener,noreferrer'));
-  $('chartStatus').textContent = `Requested charts for ${limit} of ${rows.length} matching symbols. If tabs are blocked, allow pop-ups or open symbols individually.`;
-};
-
-$('chartExchange').onchange = updateChartControls;
+$('chartReload').onclick = renderPriceChart;
+$('chartIndicators').onchange = renderPriceChart;
 
 $('run').onclick = async () => {
   const st = $('status'); $('run').disabled = true;
@@ -396,6 +583,7 @@ $('run').onclick = async () => {
     results = analyse(dates, Math.max(2, +$('look').value), +$('mult').value || 3, Math.max(5, +$('bbN').value || 20), +$('bbK').value || 2);
     st.textContent = `${dates.length} trading days, ${dates[0]} to ${dates[dates.length - 1]}. Trade order: ${[...ordInfo].join(', ')}.`;
     renderOut();
+    if (selectedChartSymbol) renderPriceChart();
   } catch (e) { st.textContent = e.message; }
   $('run').disabled = false;
 };
